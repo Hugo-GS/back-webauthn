@@ -332,16 +332,20 @@ export class WebAuthnService {
         userId: user.id
       });
       
-      // Check if counter validation is disabled for development
+      // Enhanced counter validation logic
       const disableCounterCheck = process.env.WEBAUTHN_DISABLE_COUNTER_CHECK === 'true';
+      const isCounterValid = this.validateCounter(credential.counter, newCounter);
       
-      console.log('🔧 [WebAuthn Service] Counter check configuration:', {
+      console.log('🔧 [WebAuthn Service] Counter validation:', {
         WEBAUTHN_DISABLE_COUNTER_CHECK: process.env.WEBAUTHN_DISABLE_COUNTER_CHECK,
         disableCounterCheck: disableCounterCheck,
-        willSkipValidation: disableCounterCheck && newCounter <= credential.counter
+        currentCounter: credential.counter,
+        newCounter: newCounter,
+        isCounterValid: isCounterValid,
+        willSkipValidation: disableCounterCheck || isCounterValid
       });
       
-      if (newCounter <= credential.counter && !disableCounterCheck) {
+      if (!isCounterValid && !disableCounterCheck) {
         console.error('❌ [WebAuthn Service] Counter validation failed - possible replay attack:', {
           credentialId: credential.credentialID,
           currentCounter: credential.counter,
@@ -350,7 +354,7 @@ export class WebAuthnService {
           userId: user.id
         });
         throw new WebAuthnAuthenticationError('Invalid counter value - possible replay attack');
-      } else if (newCounter <= credential.counter && disableCounterCheck) {
+      } else if (!isCounterValid && disableCounterCheck) {
         console.warn('⚠️ [WebAuthn Service] Counter validation failed but DISABLED for development:', {
           credentialId: credential.credentialID,
           currentCounter: credential.counter,
@@ -414,5 +418,52 @@ export class WebAuthnService {
     });
 
     return (result.affected ?? 0) > 0;
+  }
+
+  /**
+   * Validate counter value for replay attack prevention
+   * This method handles the common case where authenticators don't properly implement counters
+   * @param currentCounter - The stored counter value
+   * @param newCounter - The new counter value from authentication
+   * @returns True if counter is valid or acceptable
+   */
+  private validateCounter(currentCounter: number, newCounter: number): boolean {
+    // Case 1: Counter properly incremented (ideal case)
+    if (newCounter > currentCounter) {
+      return true;
+    }
+
+    // Case 2: Both counters are 0 (common with browser/mobile authenticators)
+    // This is acceptable for authenticators that don't implement counters
+    if (currentCounter === 0 && newCounter === 0) {
+      console.log('ℹ️ [WebAuthn Service] Counter validation: Both counters are 0 (authenticator doesn\'t support counters)');
+      return true;
+    }
+
+    // Case 3: New counter is 0 but current is not (potential reset)
+    // Some authenticators reset counter after device reset/reinstall
+    if (newCounter === 0 && currentCounter > 0) {
+      console.warn('⚠️ [WebAuthn Service] Counter validation: Counter reset detected (device may have been reset)');
+      return true; // Allow but log warning
+    }
+
+    // Case 4: Counter decreased (potential replay attack)
+    if (newCounter < currentCounter && newCounter > 0) {
+      console.error('❌ [WebAuthn Service] Counter validation: Counter decreased - likely replay attack');
+      return false;
+    }
+
+    // Case 5: Counter stayed the same but is not 0 (potential replay attack)
+    if (newCounter === currentCounter && newCounter > 0) {
+      console.error('❌ [WebAuthn Service] Counter validation: Counter unchanged - potential replay attack');
+      return false;
+    }
+
+    // Default case: allow (with logging for investigation)
+    console.warn('⚠️ [WebAuthn Service] Counter validation: Unusual counter behavior, allowing but logging', {
+      currentCounter,
+      newCounter
+    });
+    return true;
   }
 }
